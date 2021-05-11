@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	"sort"
+	"github.com/aws/aws-lambda-go/lambda"
+	"time"
 
 	//"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
@@ -28,16 +29,16 @@ func EcrNewSession() *ecr.ECR {
 	return svc
 }
 
-func HandlerStartScan(svc *ecr.ECR) {
+func AwsStartScan(svc *ecr.ECR, id string, it string, ri string, rn string) {
 	specImage := imageID{
-		ImageDigest: "sha256:1e1a915f208cab016a981212218d465053572007b9122b5e149d16830e33751b",
-		ImageTag:    "7-2.7.1-12.22.1",
+		ImageDigest: id,
+		ImageTag:    it,
 	}
 
 	spec := &ScanSpec{
 		ImageID:    specImage,
-		RegistryID: "355716222559",
-		Repository: "centos-ruby-node",
+		RegistryID: ri,
+		Repository: rn,
 	}
 
 	input := &ecr.StartImageScanInput{
@@ -72,7 +73,7 @@ func HandlerStartScan(svc *ecr.ECR) {
 	fmt.Println(result)
 }
 
-func HandlerListRepo(svc *ecr.ECR) []string {
+func AwsListRepo(svc *ecr.ECR) []string {
 	input := &ecr.DescribeRepositoriesInput{}
 
 	result, err := svc.DescribeRepositories(input)
@@ -105,13 +106,13 @@ func HandlerListRepo(svc *ecr.ECR) []string {
 	return repoName
 }
 
-func HandleListImage(svc *ecr.ECR, rn string) *ecr.ListImagesOutput {
-	//svc := ecr.New(session.Must(session.NewSession()), aws.NewConfig().WithRegion("ap-southeast-1"))
-	input := &ecr.ListImagesInput{
-		RepositoryName: aws.String(rn),
+func AWSDescribeImage(svc *ecr.ECR, rn string) (string, string, string, string) {
+	repoName := rn
+	input := &ecr.DescribeImagesInput{
+		RepositoryName: &repoName,
 	}
 
-	result, err := svc.ListImages(input)
+	result, err := svc.DescribeImages(input)
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			switch aerr.Code() {
@@ -125,27 +126,41 @@ func HandleListImage(svc *ecr.ECR, rn string) *ecr.ListImagesOutput {
 				fmt.Println(aerr.Error())
 			}
 		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
 			fmt.Println(err.Error())
 		}
-		//return
 	}
 
-	//fmt.Println("result = ", reflect.TypeOf(result))
-	//fmt.Println(result)
+	var imagePushAt time.Time
+	var imageTag string
+	var imageDigest string
+	var registryID string
+	var repository string
 
-	return result
+	for _, r := range result.ImageDetails {
+		if r.ImagePushedAt.After(imagePushAt) == true {
+			for _, t := range r.ImageTags {
+				imageTag = *t
+			}
+			imagePushAt = *r.ImagePushedAt
+			imageDigest = *r.ImageDigest
+			registryID = *r.RegistryId
+			repository = *r.RepositoryName
+		}
+	}
+
+	return imageDigest, imageTag, registryID, repository
+}
+
+func HandleLambda() {
+	svc := EcrNewSession()
+	repoArray := AwsListRepo(svc)
+
+	for _, r := range repoArray {
+		imageDigest, imageTag, registryID, repository := AWSDescribeImage(svc, r)
+		AwsStartScan(svc, imageDigest, imageTag, registryID, repository)
+	}
 }
 
 func main() {
-	//lambda.Start(HandlerStartScan)
-	svc := EcrNewSession()
-	//HandleListImage(svc)
-	abc := HandlerListRepo(svc)
-
-	for _, r := range abc {
-		fmt.Println(sort.Strings(string(HandleListImage(svc, r))))
-	}
-
+	lambda.Start(HandleLambda)
 }
