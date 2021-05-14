@@ -3,16 +3,32 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 )
+
+// Lambda Environment Variables
+var functionName string = os.Getenv("AWS_LAMBDA_FUNCTION_NAME")
+var encryptedChannel string = os.Getenv("CHANNEL")
+var encryptedUserName string = os.Getenv("USERNAME")
+var encryptedWebHookURL string = os.Getenv("WEBHOOKURL")
+var kmsARN string = os.Getenv("KMS_ARN")
+var decryptedChannel string
+var decryptedUserName string
+var decryptedWebHookURL string
 
 const DefaultSlackTimeout = 5 * time.Second
 
@@ -33,6 +49,8 @@ type SlackJobNotification struct {
 	IconEmoji string
 	Details   string
 	Text      string
+	Title     string
+	TitleLink string
 }
 
 type SlackMessage struct {
@@ -78,9 +96,11 @@ func (sc SlackClient) SendSlackNotification(sr SimpleSlackRequest) error {
 
 func (sc SlackClient) SendJobNotification(job SlackJobNotification) error {
 	attachment := Attachment{
-		Color: job.Color,
-		Text:  job.Details,
-		Ts:    json.Number(strconv.FormatInt(time.Now().Unix(), 10)),
+		Color:     job.Color,
+		Text:      job.Details,
+		Ts:        json.Number(strconv.FormatInt(time.Now().Unix(), 10)),
+		Title:     job.Title,
+		TitleLink: job.TitleLink,
 	}
 	slackRequest := SlackMessage{
 		Text:        job.Text,
@@ -170,17 +190,74 @@ type FindingSeverityCountsType struct {
 	Medium   int64 `json:"MEDIUM"`
 }
 
-func HandleRequest(ctx context.Context, event SimpleType) (events.APIGatewayProxyResponse, error) {
-	sc := SlackClient{
-		WebHookUrl: "https://hooks.slack.com/services/XXXXX/XXXXXXX/XXXXXXX",
-		UserName:   "incoming-webhook",
-		Channel:    "test-monitoring",
+func AwsKmsDecrypt(a string, b string) *kms.DecryptOutput {
+	svc := kms.New(session.Must(session.NewSession()), aws.NewConfig().WithRegion("ap-southeast-1"))
+
+	decodedBytes, err := base64.StdEncoding.DecodeString(a)
+	if err != nil {
+		panic(err)
+	}
+	input := &kms.DecryptInput{
+		CiphertextBlob: decodedBytes,
+		EncryptionContext: aws.StringMap(map[string]string{
+			"LambdaFunctionName": "golang_ecr",
+		}),
+		KeyId: aws.String(b),
 	}
 
-	log.Print(fmt.Sprintf("imageTag:[%s] ", event.Detail.ImageTags[0]))
-	log.Print(fmt.Sprintf("ImageDigest:[%s] ", event.Detail.ImageDigest))
-	log.Print(fmt.Sprintf("RepositoryName:[%s] ", event.Detail.RepositoryName))
-	//log.Print(fmt.Sprintf("Account:[%s] ", event.Account))
+	result, err := svc.Decrypt(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case kms.ErrCodeNotFoundException:
+				fmt.Println(kms.ErrCodeNotFoundException, aerr.Error())
+			case kms.ErrCodeDisabledException:
+				fmt.Println(kms.ErrCodeDisabledException, aerr.Error())
+			case kms.ErrCodeInvalidCiphertextException:
+				fmt.Println(kms.ErrCodeInvalidCiphertextException, aerr.Error())
+			case kms.ErrCodeKeyUnavailableException:
+				fmt.Println(kms.ErrCodeKeyUnavailableException, aerr.Error())
+			case kms.ErrCodeIncorrectKeyException:
+				fmt.Println(kms.ErrCodeIncorrectKeyException, aerr.Error())
+			case kms.ErrCodeInvalidKeyUsageException:
+				fmt.Println(kms.ErrCodeInvalidKeyUsageException, aerr.Error())
+			case kms.ErrCodeDependencyTimeoutException:
+				fmt.Println(kms.ErrCodeDependencyTimeoutException, aerr.Error())
+			case kms.ErrCodeInvalidGrantTokenException:
+				fmt.Println(kms.ErrCodeInvalidGrantTokenException, aerr.Error())
+			case kms.ErrCodeInternalException:
+				fmt.Println(kms.ErrCodeInternalException, aerr.Error())
+			case kms.ErrCodeInvalidStateException:
+				fmt.Println(kms.ErrCodeInvalidStateException, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+		}
+		//return
+	}
+
+	return result
+}
+
+func HandleRequest(ctx context.Context, event SimpleType) (events.APIGatewayProxyResponse, error) {
+
+	decryptedWebHookURL = string(AwsKmsDecrypt(encryptedWebHookURL, kmsARN).Plaintext[:])
+	decryptedUserName = string(AwsKmsDecrypt(encryptedUserName, kmsARN).Plaintext[:])
+	decryptedChannel = string(AwsKmsDecrypt(encryptedChannel, kmsARN).Plaintext[:])
+
+	sc := SlackClient{
+		WebHookUrl: decryptedWebHookURL,
+		UserName:   decryptedUserName,
+		Channel:    decryptedChannel,
+	}
+
+	//log.Print(fmt.Sprintf("decryptedWebHookURL:[%s] ", decryptedWebHookURL))
+	//log.Print(fmt.Sprintf("decryptedUserName:[%s] ", decryptedUserName))
+	//log.Print(fmt.Sprintf("decryptedChannel:[%s] ", decryptedChannel))
 
 	c := event.Detail.FindingSeverityCounts.Critical
 	h := event.Detail.FindingSeverityCounts.High
@@ -206,7 +283,9 @@ func HandleRequest(ctx context.Context, event SimpleType) (events.APIGatewayProx
 		Color:     color,
 		IconEmoji: ":hammer_and_wrench",
 		Details:   detail,
-		Text:      event.Detail.RepositoryName + ":" + event.Detail.ImageTags[0],
+		Text:      "Amazon ECR Image Scan Findings Description",
+		Title:     event.Detail.RepositoryName + ":" + event.Detail.ImageTags[0],
+		TitleLink: "https://console.aws.amazon.com/ecr/repositories/" + event.Detail.RepositoryName + "/image/" + event.Detail.ImageDigest + "/scan-results/?region=ap-southeast-1",
 	}
 
 	err := sc.SendJobNotification(sr)
