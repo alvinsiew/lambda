@@ -185,9 +185,12 @@ type DetailType struct {
 }
 
 type FindingSeverityCountsType struct {
-	Critical int64 `json:"CRITICAL"`
-	High     int64 `json:"HIGH"`
-	Medium   int64 `json:"MEDIUM"`
+	Critical      int64 `json:"CRITICAL"`
+	High          int64 `json:"HIGH"`
+	Medium        int64 `json:"MEDIUM"`
+	Low           int64 `json:"LOW"`
+	Informational int64 `json:"INFORMATIONAL"`
+	Undefined     int64 `json:"UNDEFINED"`
 }
 
 func AwsKmsDecrypt(a string, b string) *kms.DecryptOutput {
@@ -197,10 +200,11 @@ func AwsKmsDecrypt(a string, b string) *kms.DecryptOutput {
 	if err != nil {
 		panic(err)
 	}
+
 	input := &kms.DecryptInput{
 		CiphertextBlob: decodedBytes,
 		EncryptionContext: aws.StringMap(map[string]string{
-			"LambdaFunctionName": "golang_ecr",
+			"LambdaFunctionName": functionName,
 		}),
 		KeyId: aws.String(b),
 	}
@@ -262,10 +266,20 @@ func HandleRequest(ctx context.Context, event SimpleType) (events.APIGatewayProx
 	c := event.Detail.FindingSeverityCounts.Critical
 	h := event.Detail.FindingSeverityCounts.High
 	m := event.Detail.FindingSeverityCounts.Medium
+	l := event.Detail.FindingSeverityCounts.Low
+	i := event.Detail.FindingSeverityCounts.Informational
+	u := event.Detail.FindingSeverityCounts.Undefined
 
-	log.Print(fmt.Sprintf("Critical:[%d] ", c))
-	log.Print(fmt.Sprintf("High:[%d] ", h))
-	log.Print(fmt.Sprintf("Medium:[%d] ", m))
+	//log.Print(fmt.Sprintf("Critical:[%d] ", c))
+	//log.Print(fmt.Sprintf("High:[%d] ", h))
+	//log.Print(fmt.Sprintf("Medium:[%d] ", m))
+
+	detail := "CRITICAL: " + strconv.FormatInt(c, 10) +
+		"\n" + "HIGH: " + strconv.FormatInt(h, 10) +
+		"\n" + "MEDIUM:" + strconv.FormatInt(m, 10) +
+		"\n" + "LOW:" + strconv.FormatInt(l, 10) +
+		"\n" + "INFORMATIONAL" + strconv.FormatInt(i, 10) +
+		"\n" + "UNDEFINED:" + strconv.FormatInt(u, 10)
 
 	var color string
 	if h == 0 && m == 0 && c == 0 {
@@ -275,8 +289,6 @@ func HandleRequest(ctx context.Context, event SimpleType) (events.APIGatewayProx
 	} else if c == 0 && h == 0 && m > 0 {
 		color = "warning"
 	}
-
-	detail := "CRITICAL: " + strconv.FormatInt(c, 10) + "\n" + "HIGH: " + strconv.FormatInt(h, 10) + "\n" + "MEDIUM:" + strconv.FormatInt(m, 10)
 
 	//To send a notification with status (slack attachments)
 	sr := SlackJobNotification{
